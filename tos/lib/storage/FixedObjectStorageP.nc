@@ -139,7 +139,7 @@ implementation {
 				signal FixedObjectStorage.retrieveDone(SUCCESS, m_storage_id, (object_type*)m_storage.data);
 				return;
 			}
-			else debug1("crc mismatch %04x != %04x", m_st.crc, c); // Could be empty, could be broken
+			else debug1("crc mismatch %04x != %04x", m_storage.crc, c); // Could be empty, could be broken
 		}
 		signal FixedObjectStorage.retrieveDone(FAIL, m_storage_id, NULL);
 	}
@@ -149,22 +149,23 @@ implementation {
 	event void BlockWrite.writeDone(storage_addr_t addr, void *buf, storage_len_t len, error_t error) {
 		switch(m_state) {
 			case ST_STORE:
-				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "str %u", error)
+				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "str %u", error);
+				m_state = ST_IDLE;
 				signal FixedObjectStorage.storeDone(error, m_storage_id);
 				break;
 			case ST_REMOVE:
-				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "rem %u", error)
+				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "rem %u", error);
+				m_state = ST_IDLE;
 				signal FixedObjectStorage.removeDone(error, m_storage_id);
 				break;
 		}
-
 		call SyncDelay.startOneShot(1000);
 	}
 
 	event void SyncDelay.fired() {
 		if(m_state == ST_IDLE) {
 			error_t err = call BlockWrite.sync();
-			logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "s %u", error);
+			logger(err == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "s %u", err);
 			if(err == SUCCESS) {
 				m_sync = TRUE;
 				return;
