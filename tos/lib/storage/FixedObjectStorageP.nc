@@ -22,6 +22,7 @@ implementation {
 	#include "log.h"
 
 	typedef nx_struct storage_unit_t {
+		nx_uint32_t uidhash;
 		nx_uint8_t data[sizeof(object_type)];
 		nx_uint16_t crc;
 	} storage_unit_t;
@@ -107,8 +108,9 @@ implementation {
 			if(m_state == ST_IDLE) {
 				m_state = ST_STORE;
 				m_storage_id = id;
+				m_storage.uidhash = IDENT_UIDHASH;
 				memcpy(m_storage.data, object, sizeof(object_type));
-				m_storage.crc = computeCrc((uint8_t*)m_storage.data, sizeof(object_type));
+				m_storage.crc = computeCrc((uint8_t*)&m_storage, sizeof(m_storage) - sizeof(m_storage.crc));
 				post tick();
 				return SUCCESS;
 			}
@@ -136,8 +138,11 @@ implementation {
 		if(result == SUCCESS) {
 			uint16_t c = computeCrc((uint8_t*)&m_storage, sizeof(m_storage) - sizeof(m_storage.crc));
 			if(m_storage.crc == c) {
-				signal FixedObjectStorage.retrieveDone(SUCCESS, m_storage_id, (object_type*)m_storage.data);
-				return;
+				if(m_storage.uidhash == IDENT_UIDHASH) {
+					signal FixedObjectStorage.retrieveDone(SUCCESS, m_storage_id, (object_type*)m_storage.data);
+					return;
+				}
+				else debug1("uidhash mismatch");
 			}
 			else debug1("crc mismatch %04x != %04x", m_storage.crc, c); // Could be empty, could be broken
 		}
