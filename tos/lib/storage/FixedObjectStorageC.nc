@@ -12,14 +12,11 @@ generic configuration FixedObjectStorageC(volume_id_t volid, typedef object_type
 }
 implementation {
 
-	components new FixedObjectStorageP(object_type);
+	components new FixedObjectStorageP(object_type, unique("FixedObjectStorageP"));
 	FixedObjectStorage = FixedObjectStorageP;
 
 	components new BlockStorageC(volid);
 	FixedObjectStorageP.BlockRead -> BlockStorageC.BlockRead;
 	FixedObjectStorageP.BlockWrite -> BlockStorageC.BlockWrite;
-
-	components new TimerMilliC();
-	FixedObjectStorageP.SyncDelay -> TimerMilliC;
 
 }

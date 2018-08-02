@@ -4,15 +4,19 @@
  * @author Raido Pahtma
  * @license MIT
  */
+
+#ifndef SPIFFS_ENABLED
+#include "HplAt45db_chip.h"
+#endif//SPIFFS_ENABLED
+
 #include "crc.h"
-generic module FixedObjectStorageP(typedef object_type) {
+generic module FixedObjectStorageP(typedef object_type, uint8_t instance_id) {
 	provides {
 		interface FixedObjectStorage<object_type>;
 	}
 	uses {
 		interface BlockRead;
 		interface BlockWrite;
-		interface Timer<TMilli> as SyncDelay;
 	}
 }
 implementation {
@@ -35,10 +39,19 @@ implementation {
 	};
 
 	uint8_t m_state = ST_IDLE;
-	uint8_t m_sync = FALSE;
 
 	uint8_t m_storage_id;
 	storage_unit_t m_storage;
+
+#ifndef SPIFFS_ENABLED
+	// There seem to be issues with blockstorage when doing things that are not page-aligned. So align
+	// everything with pages and work around the problems until BlockStorage can be abandoned in favor
+	// of something better ... have high hopes for SPIFFS.
+	#warning "Using page-aligned object storage to overcome BlockStorage bugs"
+	const uint16_t object_storage_size = (1+((sizeof(m_storage)-1)/(1 << AT45_PAGE_SIZE_LOG2)))*(1 << AT45_PAGE_SIZE_LOG2);
+#else // With SPIFFS_ENABLED, blockstorage is just a wrapper, so there should be no need to waste space
+	const uint16_t object_storage_size = sizeof(m_storage);
+#endif//SPIFFS_ENABLED
 
 	uint16_t computeCrc(uint8_t buf[], uint16_t length) {
 		uint16_t i;
@@ -50,36 +63,33 @@ implementation {
 	}
 
 	task void tick() {
-		if(m_sync == FALSE) {
-			error_t err;
-			switch(m_state) {
-				case ST_STORE:
-					err = call BlockWrite.write(sizeof(m_storage)*m_storage_id, &m_storage, sizeof(m_storage));
-					if(err != SUCCESS) {
-						err1("write");
-						m_state = ST_IDLE;
-						signal FixedObjectStorage.storeDone(FAIL, m_storage_id);
-					}
-					break;
-				case ST_REMOVE:
-					err = call BlockWrite.write(sizeof(m_storage)*m_storage_id, &m_storage, sizeof(m_storage));
-					if(err != SUCCESS) {
-						err1("remove");
-						m_state = ST_IDLE;
-						signal FixedObjectStorage.removeDone(FAIL, m_storage_id);
-					}
-					break;
-				case ST_GET:
-					err = call BlockRead.read(sizeof(m_storage)*m_storage_id, &m_storage, sizeof(m_storage));
-					if(err != SUCCESS) {
-						err1("read");
-						m_state = ST_IDLE;
-						signal FixedObjectStorage.retrieveDone(FAIL, m_storage_id, NULL);
-					}
-					break;
-			}
+		error_t err;
+		switch(m_state) {
+			case ST_STORE:
+				err = call BlockWrite.write(object_storage_size*m_storage_id, &m_storage, sizeof(m_storage));
+				if(err != SUCCESS) {
+					err1("%d:write %d", instance_id, m_storage_id);
+					m_state = ST_IDLE;
+					signal FixedObjectStorage.storeDone(FAIL, m_storage_id);
+				}
+				break;
+			case ST_REMOVE:
+				err = call BlockWrite.write(object_storage_size*m_storage_id, &m_storage, sizeof(m_storage));
+				if(err != SUCCESS) {
+					err1("%d:remove %d", instance_id, m_storage_id);
+					m_state = ST_IDLE;
+					signal FixedObjectStorage.removeDone(FAIL, m_storage_id);
+				}
+				break;
+			case ST_GET:
+				err = call BlockRead.read(object_storage_size*m_storage_id, &m_storage, sizeof(m_storage));
+				if(err != SUCCESS) {
+					err1("%d:read %d", instance_id, m_storage_id);
+					m_state = ST_IDLE;
+					signal FixedObjectStorage.retrieveDone(FAIL, m_storage_id, NULL);
+				}
+				break;
 		}
-		else debug1("syncb");
 	}
 
 	command bool FixedObjectStorage.busy() {
@@ -87,7 +97,7 @@ implementation {
 	}
 
 	command uint16_t FixedObjectStorage.size() {
-		return call BlockRead.getSize()/sizeof(m_storage);
+		return call BlockRead.getSize()/object_storage_size;
 	}
 
 	command error_t FixedObjectStorage.retrieve(uint16_t id) {
@@ -134,59 +144,75 @@ implementation {
 	}
 
 	event void BlockRead.readDone(storage_addr_t x, void* buf, storage_len_t rlen, error_t result) {
+		debug1("%d:rD(%"PRIu32",,%"PRIu32" %d)", instance_id, (uint32_t)x, (uint32_t)rlen, result);
 		m_state = ST_IDLE;
 		if(result == SUCCESS) {
 			uint16_t c = computeCrc((uint8_t*)&m_storage, sizeof(m_storage) - sizeof(m_storage.crc));
 			if(m_storage.crc == c) {
 				if(m_storage.uidhash == IDENT_UIDHASH) {
 					signal FixedObjectStorage.retrieveDone(SUCCESS, m_storage_id, (object_type*)m_storage.data);
-					return;
 				}
-				else debug1("uidhash mismatch");
+				else {
+					warn1("%d:uidhash %"PRIx32"!=%"PRIx32" %d", instance_id, m_storage.uidhash, IDENT_UIDHASH, m_storage_id);
+					signal FixedObjectStorage.retrieveDone(SUCCESS, m_storage_id, NULL);
+				}
+				return;
 			}
-			else debug1("crc mismatch %04x != %04x", m_storage.crc, c); // Could be empty, could be broken
+			else {
+				storage_len_t i;
+				for(i=0;i<rlen;i++) {
+					if(((uint8_t*)buf)[i] != 0xFF) {
+						warnb1("%d:crc %04x!=%04x %d", (uint8_t*)buf, (uint8_t)rlen, instance_id, m_storage.crc, c, m_storage_id); // Stored data is broken
+						signal FixedObjectStorage.retrieveDone(FAIL, m_storage_id, NULL);
+						return;
+					}
+				}
+				signal FixedObjectStorage.retrieveDone(SUCCESS, m_storage_id, NULL);
+				return;
+			}
 		}
 		signal FixedObjectStorage.retrieveDone(FAIL, m_storage_id, NULL);
 	}
 
 	event void BlockRead.computeCrcDone(storage_addr_t x, storage_len_t y, uint16_t z, error_t result) { }
 
-	event void BlockWrite.writeDone(storage_addr_t addr, void *buf, storage_len_t len, error_t error) {
-		switch(m_state) {
-			case ST_STORE:
-				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "str %u", error);
-				m_state = ST_IDLE;
-				signal FixedObjectStorage.storeDone(error, m_storage_id);
-				break;
-			case ST_REMOVE:
-				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "rem %u", error);
-				m_state = ST_IDLE;
-				signal FixedObjectStorage.removeDone(error, m_storage_id);
-				break;
-		}
-		call SyncDelay.startOneShot(1000);
-	}
-
-	event void SyncDelay.fired() {
-		if(m_state == ST_IDLE) {
+	event void BlockWrite.writeDone(storage_addr_t addr, void *buf, storage_len_t len, error_t result) {
+		if(result == SUCCESS) {
 			error_t err = call BlockWrite.sync();
-			logger(err == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "s %u", err);
+			logger(err == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "%d:s %u", instance_id, err);
 			if(err == SUCCESS) {
-				m_sync = TRUE;
 				return;
 			}
 		}
-		call SyncDelay.startOneShot(1000);
+
+		// Something failed
+		switch(m_state) {
+			case ST_STORE:
+				err1("%d:str %u (%u)", instance_id, m_storage_id, result);
+				signal FixedObjectStorage.storeDone(result, m_storage_id);
+				break;
+			case ST_REMOVE:
+				err1("%d:rem %u (%u)", instance_id, m_storage_id, result);
+				signal FixedObjectStorage.removeDone(result, m_storage_id);
+				break;
+		}
+		m_state = ST_IDLE;
 	}
 
 	event void BlockWrite.eraseDone(error_t error) { }
 
 	event void BlockWrite.syncDone(error_t error) {
-		logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "sD %u", error);
-		m_sync = FALSE;
-		if(m_state != ST_IDLE) {
-			post tick();
+		switch(m_state) {
+			case ST_STORE:
+				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "%d:str %u (%u)", instance_id, m_storage_id, error);
+				signal FixedObjectStorage.storeDone(error, m_storage_id);
+				break;
+			case ST_REMOVE:
+				logger(error == SUCCESS ? LOG_DEBUG1: LOG_ERR1, "%d:rem %u (%u)", instance_id, m_storage_id, error);
+				signal FixedObjectStorage.removeDone(error, m_storage_id);
+				break;
 		}
+		m_state = ST_IDLE;
 	}
 
 }
